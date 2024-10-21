@@ -364,6 +364,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Recording", "Aufnahme"),
         ("Directory", "Verzeichnis"),
         ("Automatically record incoming sessions", "Eingehende Sitzungen automatisch aufzeichnen"),
+        ("Automatically record outgoing sessions", ""),
         ("Change", "Ändern"),
         ("Start session recording", "Sitzungsaufzeichnung starten"),
         ("Stop session recording", "Sitzungsaufzeichnung beenden"),
@@ -651,6 +652,6 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Download", "Herunterladen"),
         ("Upload folder", "Ordner hochladen"),
         ("Upload files", "Dateien hochladen"),
-        ("Clipboard is synchronized", ""),
+        ("Clipboard is synchronized", "Zwischenablage ist synchronisiert"),
     ].iter().cloned().collect();
 }
