@@ -6,8 +6,10 @@ import 'dart:ui' as ui;
 
 import 'package:bot_toast/bot_toast.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_hbb/common/widgets/peers_view.dart';
 import 'package:flutter_hbb/consts.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
@@ -1516,10 +1518,13 @@ class CanvasModel with ChangeNotifier {
     _x = (size.width - displayWidth * _scale) / 2;
     _y = (size.height - displayHeight * _scale) / 2;
     _imageOverflow.value = _x < 0 || y < 0;
+    if (isMobile && style == kRemoteViewStyleOriginal) {
+      _moveToCenterCursor();
+    }
     if (notify) {
       notifyListeners();
     }
-    if (refreshMousePos) {
+    if (!isMobile && refreshMousePos) {
       parent.target?.inputModel.refreshMousePos();
     }
     tryUpdateScrollStyle(Duration.zero, style);
@@ -1709,8 +1714,6 @@ class CanvasModel with ChangeNotifier {
     _timerMobileFocusCanvasCursor =
         Timer(Duration(milliseconds: 100), () async {
       await updateViewStyle(refreshMousePos: false, notify: false);
-      _moveToCenterCursor();
-      parent.target?.cursorModel.ensureCursorInVisibleRect();
       notifyListeners();
     });
   }
@@ -2015,17 +2018,6 @@ class CursorModel with ChangeNotifier {
     return Offset(xoffset, yoffset);
   }
 
-  void ensureCursorInVisibleRect() {
-    final ensureVisibleValue = 50.0;
-    final r = getVisibleRect();
-    final minX = r.left;
-    final maxX = max(r.right - ensureVisibleValue, r.left);
-    final minY = r.top;
-    final maxY = max(r.bottom - ensureVisibleValue, minY);
-    _x = min(max(_x, minX), maxX);
-    _y = min(max(_y, minY), maxY);
-  }
-
   get scale => parent.target?.canvasModel.scale ?? 1.0;
 
   // mobile Soft keyboard, block touch event from the KeyHelpTools
@@ -2042,22 +2034,63 @@ class CursorModel with ChangeNotifier {
     return false;
   }
 
+  // For touch mode
   move(double x, double y) {
     if (shouldBlock(x, y)) {
       _lastIsBlocked = true;
       return false;
     }
     _lastIsBlocked = false;
-    moveLocal(x, y, adjust: parent.target?.canvasModel.getAdjustY() ?? 0);
+    if (!_moveLocalIfInRemoteRect(x, y)) {
+      return false;
+    }
     parent.target?.inputModel.moveMouse(_x, _y);
     return true;
   }
 
-  moveLocal(double x, double y, {double adjust = 0}) {
+  bool isInRemoteRect(Offset offset) {
+    return getRemotePosInRect(offset) != null;
+  }
+
+  Offset? getRemotePosInRect(Offset offset) {
+    final adjust = parent.target?.canvasModel.getAdjustY() ?? 0;
+    final newPos = _getNewPos(offset.dx, offset.dy, adjust);
+    final visibleRect = getVisibleRect();
+    if (!isPointInRect(newPos, visibleRect)) {
+      return null;
+    }
+    final rect = parent.target?.ffiModel.rect;
+    if (rect != null) {
+      if (!isPointInRect(newPos, rect)) {
+        return null;
+      }
+    }
+    return newPos;
+  }
+
+  Offset _getNewPos(double x, double y, double adjust) {
     final xoffset = parent.target?.canvasModel.x ?? 0;
     final yoffset = parent.target?.canvasModel.y ?? 0;
-    _x = (x - xoffset) / scale + _displayOriginX;
-    _y = (y - yoffset - adjust) / scale + _displayOriginY;
+    final newX = (x - xoffset) / scale + _displayOriginX;
+    final newY = (y - yoffset - adjust) / scale + _displayOriginY;
+    return Offset(newX, newY);
+  }
+
+  bool _moveLocalIfInRemoteRect(double x, double y) {
+    final newPos = getRemotePosInRect(Offset(x, y));
+    if (newPos == null) {
+      return false;
+    }
+    _x = newPos.dx;
+    _y = newPos.dy;
+    notifyListeners();
+    return true;
+  }
+
+  moveLocal(double x, double y, {double adjust = 0}) {
+    final newPos = _getNewPos(x, y, adjust);
+    _x = newPos.dx;
+    _y = newPos.dy;
     notifyListeners();
   }
 
@@ -2129,13 +2162,34 @@ class CursorModel with ChangeNotifier {
     }
 
     if (dx == 0 && dy == 0) return;
-    _x += dx;
-    _y += dy;
+
+    Point? newPos;
+    final rect = parent.target?.ffiModel.rect;
+    if (rect == null) {
+      // unreachable
+      return;
+    }
+    newPos = InputModel.getPointInRemoteRect(
+        false,
+        parent.target?.ffiModel.pi.platform,
+        kPointerEventKindMouse,
+        kMouseEventTypeDefault,
+        (_x + dx).toInt(),
+        (_y + dy).toInt(),
+        rect,
+        buttons: kPrimaryButton);
+    if (newPos == null) {
+      return;
+    }
+    dx = newPos.x - _x;
+    dy = newPos.y - _y;
+    _x = newPos.x.toDouble();
+    _y = newPos.y.toDouble();
     if (tryMoveCanvasX && dx != 0) {
-      parent.target?.canvasModel.panX(-dx);
+      parent.target?.canvasModel.panX(-dx * scale);
     }
     if (tryMoveCanvasY && dy != 0) {
-      parent.target?.canvasModel.panY(-dy);
+      parent.target?.canvasModel.panY(-dy * scale);
     }
 
     parent.target?.inputModel.moveMouse(_x, _y);
@@ -2169,9 +2223,44 @@ class CursorModel with ChangeNotifier {
       }
     }
     if (!isMoved) {
+      final rect = parent.target?.ffiModel.rect;
+      if (rect == null) {
+        // unreachable
+        return;
+      }
+
+      Offset? movementInRect(double x, double y, Rect r) {
+        final isXInRect = x >= r.left && x <= r.right;
+        final isYInRect = y >= r.top && y <= r.bottom;
+        if (!(isXInRect || isYInRect)) {
+          return null;
+        }
+        if (x < r.left) {
+          x = r.left;
+        } else if (x > r.right) {
+          x = r.right;
+        }
+        if (y < r.top) {
+          y = r.top;
+        } else if (y > r.bottom) {
+          y = r.bottom;
+        }
+        return Offset(x, y);
+      }
+
       final scale = parent.target?.canvasModel.scale ?? 1.0;
-      _x += delta.dx / scale;
-      _y += delta.dy / scale;
+      var movement =
+          movementInRect(_x + delta.dx / scale, _y + delta.dy / scale, rect);
+      if (movement == null) {
+        return;
+      }
+      movement = movementInRect(movement.dx, movement.dy, getVisibleRect());
+      if (movement == null) {
+        return;
+      }
+
+      _x = movement.dx;
+      _y = movement.dy;
       parent.target?.inputModel.moveMouse(_x, _y);
     }
     notifyListeners();
